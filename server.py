@@ -108,6 +108,37 @@ class State(object):
         # self._compile_file may change. need to init mtime to avoid trigger a change event
         self.observed_info[self._compile_file] = get_mtime(self._compile_file)
 
+    def compiled_swift_files(self):
+        """Swift sources of the compile file, each once, in first-seen order (LSAI fork).
+
+        sourcekit-lsp re-indexes only files listed as file-kind sources of a target, so every
+        compiled Swift file is listed. An unreadable compile file gives [] and a warning.
+        """
+        if not self.compile_file:
+            return []
+        try:
+            with open(self.compile_file) as f:
+                entries = json.load(f)
+        except (OSError, ValueError) as ex:
+            logger.warning("compile file unreadable %s: %s", self.compile_file, ex)
+            return []
+        seen, result = set(), []
+        for entry in entries:
+            paths = list(entry.get("files") or [])
+            if entry.get("file"):
+                paths.append(entry["file"])
+            for list_path in entry.get("fileLists") or []:
+                try:
+                    with open(list_path) as lf:
+                        paths.extend(line.strip() for line in lf if line.strip())
+                except OSError as ex:
+                    logger.warning("file list unreadable %s: %s", list_path, ex)
+            for p in paths:
+                if p.endswith(".swift") and p not in seen:
+                    seen.add(p)
+                    result.append(p)
+        return result
+
     @property
     def indexStorePath(self) -> Optional[str]:
         if self.config.kind == "xcode":
@@ -427,6 +458,8 @@ def server_api():
                     "indexDatabasePath": indexDatabasePath,
                     "indexStorePath": indexStorePath,
                     "sourceKitOptionsProvider": True,
+                    # LSAI fork: sourcekit-lsp background-indexes edits only with prepare support
+                    "prepareProvider": True,
                 },
                 "dataKind": "sourceKit",
             },
@@ -496,6 +529,9 @@ def server_api():
                             "generated": False,
                         }
                     )
+                # LSAI fork: every compiled Swift file as a file-kind source, so edits are re-indexed
+                for f in shared_state.compiled_swift_files():
+                    sources.append({"uri": Path(f).as_uri(), "kind": 1, "generated": False})
                 items.append(
                     {
                         "target": target,
@@ -504,6 +540,10 @@ def server_api():
                 )
 
         return {"jsonrpc": "2.0", "id": message["id"], "result": {"items": items }}
+
+    def buildTarget_prepare(message):
+        # LSAI fork: the developer's Xcode build already prepared the modules; LSAI never builds
+        return {"jsonrpc": "2.0", "id": message["id"], "result": {}}
 
     def textDocument_registerForChanges(message):
         # empty response, ensure response before notification
