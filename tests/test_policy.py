@@ -37,5 +37,20 @@ class ForkPolicyTests(unittest.TestCase):
                 self.assertEqual(branches, [RELEASE_BRANCH], path)
 
 
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_workflow_triggers_only_on_release_branch_push_and_manual_dispatch(self):
+        path = os.path.join(WORKFLOWS_DIR, "release-0ics.yml")
+        self.assertTrue(os.path.exists(path), "release-0ics.yml must exist")
+        with open(path) as f:
+            text = f.read()
+
+        on = re.search(r"^on:\s*\n((?:[ \t]+.*\n|\s*\n)*)", text, re.MULTILINE)
+        self.assertIsNotNone(on, "on: block not found")
+        triggers = sorted(re.findall(r"^\s{2}([a-z_]+)\s*:", on.group(1), re.MULTILINE))
+        self.assertEqual(triggers, ["push", "workflow_dispatch"])
+        self.assertRegex(text, re.compile(r"^\s{2}push\s*:\s*\n\s{4}branches\s*:\s*\[release-0ics\]", re.MULTILINE))
+        self.assertEqual([os.path.basename(p) for p, _ in workflows()], ["release-0ics.yml"])
+
+
 if __name__ == "__main__":
     unittest.main()

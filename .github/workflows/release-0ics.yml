@@ -1,0 +1,34 @@
+# LSAI fork release: the only workflow. No CI on normal pushes or pull requests (fork policy).
+# Release = git push origin main-0ics:release-0ics  → tag lsai-xbs-v<0ics/VERSION>, tarball + .sha256
+name: Release (0ics)
+
+on:
+  push:
+    branches: [release-0ics]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Package
+        run: bash 0ics/package.sh dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(tr -d '[:space:]' < 0ics/VERSION)"
+          gh release create "lsai-xbs-v$VER" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "xcode-build-server $VER (LSAI fork)" \
+            --notes "xcode-build-server $VER for LSAI: every compiled Swift file as a source and buildTarget/prepare, so sourcekit-lsp re-indexes edits. Install via LSAI install.sh (macOS)."
