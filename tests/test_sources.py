@@ -11,7 +11,7 @@ import _forkroot  # noqa: F401  (fork root on sys.path)
 import server
 from config import ServerConfig
 
-DUMMY_TARGET = {"uri": "dummy://dummy"}
+DUMMY_TARGET = {"uri": "xcode://workspace"}  # the fallback target
 
 
 class StateTestBase(unittest.TestCase):
@@ -25,6 +25,7 @@ class StateTestBase(unittest.TestCase):
         self.state.root_path = self.root
         self.state.config = ServerConfig(os.path.join(self.root, "buildServer.json"))
         self.state.compile_file = None
+        self.state.store = {}
         self.previous_shared_state = server.shared_state
 
     def tearDown(self):
@@ -88,7 +89,7 @@ class CompiledSwiftFilesTests(StateTestBase):
 
 
 class BuildTargetSourcesTests(StateTestBase):
-    def test_build_target_sources_dummy_target_has_root_directory_and_one_file_item_per_swift_file(self):
+    def test_build_target_sources_fallback_target_has_root_directory_and_a_file_item_per_swift_file_of_no_module(self):
         self.write_compile_file([{"files": ["/p/A.swift", "/p/B.swift", "/p/C.m"]}])
         server.shared_state = self.state
 

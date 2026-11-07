@@ -31,4 +31,4 @@ jobs:
           gh release create "lsai-xbs-v$VER" dist/* \
             --target "$GITHUB_SHA" \
             --title "xcode-build-server $VER (LSAI fork)" \
-            --notes "xcode-build-server $VER for LSAI: every compiled Swift file as a source and buildTarget/prepare, so sourcekit-lsp re-indexes edits. Install via LSAI install.sh (macOS)."
+            --notes "xcode-build-server $VER for LSAI: one build target per Swift module, buildTarget/prepare re-emits the stale imported modules, every build log merged, local package tests indexed. Install via LSAI install.sh (macOS)."

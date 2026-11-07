@@ -10,7 +10,7 @@ NAME="xcode-build-server-$VER.tar.gz"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/xcode-build-server/0ics"
-cp -p "$ROOT"/{xcode-build-server,server.py,misc.py,compile_database.py,xcactivitylog.py,xclog_parser.py,LICENSE} "$STAGE/xcode-build-server/"
+cp -p "$ROOT"/{xcode-build-server,server.py,lsai_modules.py,misc.py,compile_database.py,xcactivitylog.py,xclog_parser.py,LICENSE} "$STAGE/xcode-build-server/"
 cp -Rp "$ROOT/config" "$ROOT/xcode" "$STAGE/xcode-build-server/"
 cp -p "$ROOT/0ics/VERSION" "$STAGE/xcode-build-server/0ics/"
 find "$STAGE" -name __pycache__ -type d -prune -exec rm -rf {} +

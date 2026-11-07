@@ -14,10 +14,12 @@ from compile_database import (
     GetWorkingDirectory,
     InferFlagsForSwift,
     filekey,
+    filterFlags,
     newfileForCompileFile,
 )
 from config import ServerConfig, env
 from misc import force_remove, get_mtime, VERSION, version_compare
+import lsai_modules
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +146,11 @@ class State(object):
         in the OutputFileMap its compile flags name. sourcekit-lsp needs one per file when it re-indexes an edit;
         without it every file of the module writes the same index unit and the last one replaces the others.
         None when the flags or the map do not say."""
+        if module := self.package_test_module_of(file_path):  # never compiled: an index unit name of its own
+            relative = file_path.lstrip(os.sep).replace(os.sep, "_")
+            return os.path.join(lsai_modules.group_dir(self.modules_dir, module.group), "units", module.name, relative + ".o")
         try:
-            flags = GetFlags(file_path, self.compile_file, store=self.store)
+            flags = self.file_flags(file_path)
             if not flags:
                 flags = InferFlagsForSwift(file_path, self.compile_file, store=self.store)
             map_path = flags[flags.index("-output-file-map") + 1]
@@ -162,6 +167,62 @@ class State(object):
                 maps[map_path] = {}
         entry = maps[map_path].get(file_path) or {}
         return entry.get("index-unit-output-path") or entry.get("object")
+
+    @property
+    def modules_dir(self):
+        """Where prepare re-emits the modules a target imports (LSAI fork): this server's cache, never DerivedData."""
+        return os.path.join(self.cache_path, lsai_modules.MODULES_DIR_NAME)
+
+    def swift_modules(self):
+        """The Swift modules of the compile file (LSAI fork), each a build target."""
+        if not self.compile_file:
+            return []
+        if "lsai_modules" not in self.store:
+            self.store["lsai_modules"] = lsai_modules.swift_modules(self.compile_file, self.store)
+        return self.store["lsai_modules"]
+
+    def package_test_modules(self):
+        """The test targets of the local packages the Xcode build compiles (LSAI fork), with their library's flags."""
+        if "lsai_package_test_modules" not in self.store:
+            self.store["lsai_package_test_modules"] = lsai_modules.package_test_modules(self.swift_modules())
+        return self.store["lsai_package_test_modules"]
+
+    def all_modules(self):
+        return self.swift_modules() + self.package_test_modules()
+
+    def target_modules(self):
+        """The build targets (LSAI fork): each module once, as its files are compiled."""
+        return [m for m in self.all_modules() if m.primary]
+
+    def module_dependencies(self):
+        if "lsai_module_dependencies" not in self.store:
+            self.store["lsai_module_dependencies"] = lsai_modules.module_dependencies(self.target_modules())
+        return self.store["lsai_module_dependencies"]
+
+    def package_test_module_of(self, file_path):
+        key = filekey(file_path)
+        for module in self.package_test_modules():
+            if module.primary and any(filekey(s) == key for s in module.sources):
+                return module
+        return None
+
+    def file_flags(self, file_path):
+        """The compile flags of a file: the Xcode build's, else those of the package test target that lists it."""
+        flags = GetFlags(file_path, self.compile_file, store=self.store)
+        if flags:
+            return flags
+        if module := self.package_test_module_of(file_path):
+            return list(filterFlags(module.command[1:], self.store.setdefault("filelist", {})))
+        return None
+
+    def source_item(self, file_path):
+        """A Swift file as a file-kind source with its index unit output path (LSAI fork)."""
+        item = {"uri": Path(file_path).as_uri(), "kind": 1, "generated": False}
+        output_path = self.swift_output_path(file_path)
+        if output_path:
+            item["dataKind"] = "sourceKit"
+            item["data"] = {"language": "swift", "kind": "source", "outputPath": output_path}
+        return item
 
     @property
     def indexStorePath(self) -> Optional[str]:
@@ -182,7 +243,7 @@ class State(object):
         self.observed_uri.add(uri)
 
         file_path = uri2realpath(uri)
-        flags = GetFlags(file_path, self.compile_file, store=self.store)
+        flags = self.file_flags(file_path)
 
         if not flags and env.new_file:
             if filekeys := newfileForCompileFile(
@@ -206,7 +267,7 @@ class State(object):
 
     def sourceKitOptions(self, uri):
         file_path = uri2realpath(uri)
-        flags = GetFlags(file_path, self.compile_file, store=self.store)
+        flags = self.file_flags(file_path)
         if not flags and env.new_file:
             if newfileForCompileFile(file_path, self.compile_file, store=self.store):
                 flags = GetFlags(file_path, self.compile_file, store=self.store)
@@ -226,7 +287,7 @@ class State(object):
 
     def optionsForFile(self, uri):
         file_path = uri2realpath(uri)
-        flags = GetFlags(file_path, self.compile_file, store=self.store)
+        flags = self.file_flags(file_path)
         if not flags and file_path.endswith(".swift"):
             flags = InferFlagsForSwift(file_path, self.compile_file, store=self.store)
         working_directory = GetWorkingDirectory(file_path, self.compile_file, store=self.store)
@@ -242,6 +303,11 @@ class State(object):
                 workdir = working_directory
             else:
                 workdir = os.getcwd()
+        if "-module-name" in flags:  # LSAI fork: a Swift file finds the modules prepare re-emitted first
+            modules_dir = lsai_modules.group_dir(self.modules_dir, lsai_modules._value(flags, "-target"))
+            # an explicit module build needs the precompiled modules of the build's own graph: the index compile of
+            # a file crashes on them (SIGTRAP), the implicit module cache serves every platform
+            flags = ["-I", modules_dir] + [f for f in flags if f != "-explicit-module-build"]
         return {
             "options": flags,
             "workingDirectory": workdir,
@@ -314,8 +380,10 @@ class State(object):
             return
         if self.check_locking_compile_file():
             return
-        if log_path := self.log_path_for_invalid_compile_file():
+        for log_path in self.log_paths_for_invalid_compile_file():
             self.trigger_parse(log_path)
+            if self.locking_compile_file:  # another parse holds the compile file: it merges the logs after
+                break
 
     def handle_build_server_config_change(self):
         mtime = get_mtime(self.config.path)
@@ -353,15 +421,18 @@ class State(object):
 
             self.locking_compile_file = False
 
-    def log_path_for_invalid_compile_file(self) -> Optional[str]:
-        """return log path if not valid, else None"""
+    def log_paths_for_invalid_compile_file(self) -> list:
+        """the build logs newer than the compile file, oldest first; [] when it is up to date.
+
+        LSAI fork: every build the developer ran is merged (the app, its tests, a local package's tests),
+        not only the newest one, so a later build of the app alone does not drop the tests from the index."""
 
         # TODO: xcodebuild not generate log until specify -resultBundlePath #
 
         build_root = self.config.build_root
         assert isinstance(build_root, str)
 
-        from xcactivitylog import metapath_from_buildroot, newest_logpath
+        from xcactivitylog import metapath_from_buildroot, logpaths
 
         def update_check_time(path):
             """return mtime if updated, else None"""
@@ -374,17 +445,11 @@ class State(object):
         compile_file_mtime = self.observed_info[self._compile_file]
         xcactivitylog_index = metapath_from_buildroot(build_root)
         if not (xcactivitylog_index_mtime := update_check_time(xcactivitylog_index)):
-            return
+            return []
         if compile_file_mtime > xcactivitylog_index_mtime:
-            return
+            return []
 
-        xcpath = newest_logpath(xcactivitylog_index, self.config.scheme)
-        if not (xcpath and (xcpath_mtime := update_check_time(xcpath))):
-            return
-        if compile_file_mtime > xcpath_mtime:
-            return
-
-        return xcpath
+        return [p for p in logpaths(xcactivitylog_index, self.config.scheme) if get_mtime(p) > compile_file_mtime]
 
     def trigger_parse(self, xcpath):
         # FIXME: ensure index_store_path from buildServer.json consistent with parsed .compile file..
@@ -502,42 +567,45 @@ def server_api():
         }
 
     def workspace_buildTargets(message):
-        return {
-            "jsonrpc": "2.0",
-            "id": message["id"],
-            "result": {
-                # TODO: support real multiple target
-                "targets": [
-                    {
-                        "id": {"uri": "dummy://dummy"},
-                        "displayName": "BuildServer",
-                        "tags": ["test"],
-                        "capabilities": {
-                            # "canCompile": True,
-                            # "canTest": False,
-                            # "canRun": False
-                        },
-                        "languageIds": [
-                            "c",
-                            "cpp",
-                            "objective-c",
-                            "objective-cpp",
-                            "swift",
-                        ],
-                        "dependencies": [],
-                    }
-                ]
-            },
-        }
+        # LSAI fork: one target per Swift module, depending on the modules it imports, then the fallback target
+        # whose directories hold every other file
+        modules = shared_state.target_modules() if shared_state else []
+        deps = shared_state.module_dependencies() if modules else {}
+        targets = [
+            {
+                "id": {"uri": lsai_modules.MODULE_TARGET_SCHEME + m.name},
+                "displayName": m.name,
+                "tags": [],
+                "capabilities": {},
+                "languageIds": ["swift"],
+                "dependencies": [{"uri": lsai_modules.MODULE_TARGET_SCHEME + d} for d in deps.get(m.name, [])],
+            }
+            for m in modules
+        ]
+        targets.append(
+            {
+                "id": dict(lsai_modules.FALLBACK_TARGET),
+                "displayName": "BuildServer",
+                "tags": ["test"],
+                "capabilities": {},
+                "languageIds": ["c", "cpp", "objective-c", "objective-cpp", "swift"],
+                "dependencies": [],
+            }
+        )
+        return {"jsonrpc": "2.0", "id": message["id"], "result": {"targets": targets}}
 
     def buildTarget_sources(message):
         params: dict = message["params"]
+        modules = {m.name: m for m in shared_state.target_modules()}
         items = []
         for target in params["targets"]:
-            if target["uri"] == "dummy://dummy":
+            uri = target["uri"]
+            if uri.startswith(lsai_modules.MODULE_TARGET_SCHEME):
+                module = modules.get(uri[len(lsai_modules.MODULE_TARGET_SCHEME):])
+                sources = [shared_state.source_item(f) for f in module.sources] if module else []
+            elif uri == lsai_modules.FALLBACK_TARGET["uri"]:
                 sources = [
                     {
-                        # TODO: 换成真实的target和sources
                         "uri": Path(shared_state.root_path).as_uri(),
                         "kind": 2,  # 1: file, 2: directory
                         "generated": False,
@@ -555,25 +623,22 @@ def server_api():
                             "generated": False,
                         }
                     )
-                # LSAI fork: every compiled Swift file as a file-kind source, so edits are re-indexed
-                for f in shared_state.compiled_swift_files():
-                    item = {"uri": Path(f).as_uri(), "kind": 1, "generated": False}
-                    output_path = shared_state.swift_output_path(f)
-                    if output_path:
-                        item["dataKind"] = "sourceKit"
-                        item["data"] = {"language": "swift", "kind": "source", "outputPath": output_path}
-                    sources.append(item)
-                items.append(
-                    {
-                        "target": target,
-                        "sources": sources,
-                    }
-                )
+                # LSAI fork: a compiled Swift file no module lists is still a file-kind source, so edits are re-indexed
+                in_modules = {f for m in modules.values() for f in m.sources}
+                sources.extend(shared_state.source_item(f) for f in shared_state.compiled_swift_files() if f not in in_modules)
+            else:
+                continue
+            items.append({"target": target, "sources": sources})
 
-        return {"jsonrpc": "2.0", "id": message["id"], "result": {"items": items }}
+        return {"jsonrpc": "2.0", "id": message["id"], "result": {"items": items}}
 
     def buildTarget_prepare(message):
-        # LSAI fork: the developer's Xcode build already prepared the modules; LSAI never builds
+        # LSAI fork: re-emit the stale modules the targets import into this server's cache; the developer's
+        # build is never run and DerivedData never written
+        scheme = lsai_modules.MODULE_TARGET_SCHEME
+        names = [t["uri"][len(scheme):] for t in message["params"].get("targets", []) if t["uri"].startswith(scheme)]
+        if names:
+            lsai_modules.prepare(names, shared_state.all_modules(), shared_state.modules_dir)
         return {"jsonrpc": "2.0", "id": message["id"], "result": {}}
 
     def textDocument_registerForChanges(message):

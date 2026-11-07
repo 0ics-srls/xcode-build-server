@@ -112,26 +112,29 @@ def extract_compile_log(path):
             yield ""  # a empty line means section log end
 
 
-def newest_logpath(metapath: str, scheme=None):
-    """returns None if no metapath or no logpath"""
+def logpaths(metapath: str, scheme=None):
+    """every build log of the manifest, oldest first (LSAI fork); [] if no manifest"""
     if not os.path.exists(metapath):
-        return None
+        return []
 
     import plistlib
 
     with open(metapath, "rb") as f:
         meta = plistlib.load(f)
 
-        if scheme:
-            valid = lambda v: v["schemeIdentifier-schemeName"] == scheme
-        else:
-            valid = bool
-        logs = [v for v in meta["logs"].values() if valid(v)]
-        if not logs:
-            return None
+    if scheme:
+        valid = lambda v: v["schemeIdentifier-schemeName"] == scheme
+    else:
+        valid = bool
+    logs = [v for v in meta["logs"].values() if valid(v)]
+    logs.sort(key=lambda v: v["timeStoppedRecording"])
+    return [os.path.join(os.path.dirname(metapath), v["fileName"]) for v in logs]
 
-        logs.sort(key=lambda v: v["timeStoppedRecording"], reverse=True)
-        return os.path.join(os.path.dirname(metapath), logs[0]["fileName"])
+
+def newest_logpath(metapath: str, scheme=None):
+    """returns None if no metapath or no logpath"""
+    paths = logpaths(metapath, scheme)
+    return paths[-1] if paths else None
 
 
 def metapath_from_buildroot(build_root):

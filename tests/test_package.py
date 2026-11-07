@@ -45,7 +45,7 @@ class PackageTests(unittest.TestCase):
     def test_package_archive_has_top_folder_with_runtime_files_and_no_tests_or_github(self):
         names = self.members().keys()
 
-        for required in ["xcode-build-server", "server.py", "misc.py", "compile_database.py", "xcactivitylog.py",
+        for required in ["xcode-build-server", "server.py", "lsai_modules.py", "misc.py", "compile_database.py", "xcactivitylog.py",
                          "xclog_parser.py", "config", "config/config.py", "xcode", "LICENSE", "0ics/VERSION"]:
             self.assertIn(TOP + "/" + required, names)
         self.assertTrue(all(n == TOP or n.startswith(TOP + "/") for n in names), sorted(names))
