@@ -139,6 +139,30 @@ class State(object):
                     result.append(p)
         return result
 
+    def swift_output_path(self, file_path):
+        """The index unit output path of a Swift file (LSAI fork): its `index-unit-output-path` (else `object`)
+        in the OutputFileMap its compile flags name. sourcekit-lsp needs one per file when it re-indexes an edit;
+        without it every file of the module writes the same index unit and the last one replaces the others.
+        None when the flags or the map do not say."""
+        try:
+            flags = GetFlags(file_path, self.compile_file, store=self.store)
+            if not flags:
+                flags = InferFlagsForSwift(file_path, self.compile_file, store=self.store)
+            map_path = flags[flags.index("-output-file-map") + 1]
+        except Exception as ex:  # no compile info for this file: sourcekit-lsp indexes it without an output path
+            logger.debug("no output file map for %s: %s", file_path, ex)
+            return None
+        maps = self.__dict__.setdefault("_output_file_maps", {})
+        if map_path not in maps:
+            try:
+                with open(map_path) as f:
+                    maps[map_path] = json.load(f)
+            except (OSError, ValueError) as ex:
+                logger.warning("output file map unreadable %s: %s", map_path, ex)
+                maps[map_path] = {}
+        entry = maps[map_path].get(file_path) or {}
+        return entry.get("index-unit-output-path") or entry.get("object")
+
     @property
     def indexStorePath(self) -> Optional[str]:
         if self.config.kind == "xcode":
@@ -460,6 +484,8 @@ def server_api():
                     "sourceKitOptionsProvider": True,
                     # LSAI fork: sourcekit-lsp background-indexes edits only with prepare support
                     "prepareProvider": True,
+                    # LSAI fork: each Swift source carries its index unit output path (buildTarget/sources)
+                    "outputPathsProvider": True,
                 },
                 "dataKind": "sourceKit",
             },
@@ -531,7 +557,12 @@ def server_api():
                     )
                 # LSAI fork: every compiled Swift file as a file-kind source, so edits are re-indexed
                 for f in shared_state.compiled_swift_files():
-                    sources.append({"uri": Path(f).as_uri(), "kind": 1, "generated": False})
+                    item = {"uri": Path(f).as_uri(), "kind": 1, "generated": False}
+                    output_path = shared_state.swift_output_path(f)
+                    if output_path:
+                        item["dataKind"] = "sourceKit"
+                        item["data"] = {"language": "swift", "kind": "source", "outputPath": output_path}
+                    sources.append(item)
                 items.append(
                     {
                         "target": target,

@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _forkroot  # noqa: F401  (fork root on sys.path)
 import server
@@ -103,6 +104,56 @@ class BuildTargetSourcesTests(StateTestBase):
         ])
 
 
+class SwiftOutputPathTests(StateTestBase):
+    """sourcekit-lsp re-indexes an edited file into the index unit named by its output path: one per file."""
+
+    def write_output_file_map(self, entries):
+        path = os.path.join(self.tmp, "App-OutputFileMap.json")
+        with open(path, "w") as f:
+            json.dump(entries, f)
+        return path
+
+    def test_swift_output_path_reads_index_unit_output_path_from_the_flags_output_file_map(self):
+        map_path = self.write_output_file_map({
+            "/p/A.swift": {"index-unit-output-path": "/dd/A.o", "object": "/dd/A-obj.o"},
+        })
+        self.state.store = {}
+        with mock.patch.object(server, "GetFlags", return_value=["-module-name", "App", "-output-file-map", map_path]):
+            result = self.state.swift_output_path("/p/A.swift")
+
+        self.assertEqual(result, "/dd/A.o")
+
+    def test_swift_output_path_falls_back_to_object(self):
+        map_path = self.write_output_file_map({"/p/B.swift": {"object": "/dd/B.o"}})
+        self.state.store = {}
+        with mock.patch.object(server, "GetFlags", return_value=["-output-file-map", map_path]):
+            result = self.state.swift_output_path("/p/B.swift")
+
+        self.assertEqual(result, "/dd/B.o")
+
+    def test_swift_output_path_without_output_file_map_is_none(self):
+        self.state.store = {}
+        with mock.patch.object(server, "GetFlags", return_value=["-module-name", "App"]):
+            result = self.state.swift_output_path("/p/A.swift")
+
+        self.assertIsNone(result)
+
+    def test_build_target_sources_file_items_carry_their_sourcekit_output_path(self):
+        self.write_compile_file([{"files": ["/p/A.swift", "/p/B.swift"]}])
+        self.state.store = {}
+        server.shared_state = self.state
+        outputs = {"/p/A.swift": "/dd/A.o", "/p/B.swift": None}
+
+        with mock.patch.object(server.State, "swift_output_path", lambda _self, f: outputs[f]):
+            response = server.dispatch["buildTarget_sources"]({"id": 8, "params": {"targets": [DUMMY_TARGET]}})
+
+        items = {s["uri"]: s for s in response["result"]["items"][0]["sources"] if s["kind"] == 1}
+        a = items[Path("/p/A.swift").as_uri()]
+        self.assertEqual(a["dataKind"], "sourceKit")
+        self.assertEqual(a["data"], {"language": "swift", "kind": "source", "outputPath": "/dd/A.o"})
+        self.assertNotIn("data", items[Path("/p/B.swift").as_uri()])
+
+
 class BuildInitializeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -128,6 +179,7 @@ class BuildInitializeTests(unittest.TestCase):
 
         data = response["result"]["data"]
         self.assertIs(data["prepareProvider"], True)
+        self.assertIs(data["outputPathsProvider"], True)
         self.assertIs(data["sourceKitOptionsProvider"], True)
 
 
